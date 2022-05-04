@@ -390,6 +390,7 @@ function Get-F5VirtualServer {
         $req.Uri += '?expandSubcollections=true'
     }
 
+ 
     $res = Invoke-F5RestMethod $req $f5_connection
 
     if (!$name) {
@@ -590,6 +591,93 @@ function Get-F5VirtualServerProfile {
         return $res.items
     }
     return $res
+}
+
+function Get-F5VirtualServerPools {
+    <#
+        Pools can be attached to a virutal server in a number of ways. This method supports two:
+        1. default pool
+        2. pool attached as part of a policy
+    #>
+
+
+    param(
+        [string][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $name,
+
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+
+
+
+    # Get the existing virtual server object.
+    $vs = Get-F5VirtualServer -name $name -expand_subcollections 
+    #Write-Host "Found virtual server $($vs.name)"
+
+
+
+    # Get the default pool if it exists
+    $pools = @()
+    if($vs.pool -ne $null){
+        $pools += Get-F5Pool -name $vs.pool.replace("/","~")
+    }
+
+
+    # Get an attached policy (noting that not all policies are ones that will reference a pool)
+
+    if($vs.policiesReference.items -ne $null){
+        foreach($item in $vs.policiesReference.items){
+            
+            $pol_rules = Get-F5PolicyRule -policy_name $item.fullPath.replace("/","~") -expand_subcollections
+            foreach($rule in $pol_rules){
+              #  Write-Host "Policy Rule name $($rule.actionsReference)"
+                $action_references = $rule.actionsReference.items
+                foreach($ar in $action_references){
+                    if($ar.pool -ne $null){
+                        $pools += Get-F5Pool -name $ar.pool.replace("/","~")
+                    }
+                }
+
+            }
+
+        }
+
+    }
+
+    return $pools
+    
+
+}
+
+function Add-F5PoolMember {
+    param(
+        [string][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $name,
+
+        [string][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $pool_member_address,
+
+        [int][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $pool_member_port,
+
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+
+
+
+    $req = @{
+        Uri = "/ltm/pool/$name/members"
+        Method = 'POST'
+        ContentType = 'application/json'
+        body = "{  `"name`":`"$pool_member_address`:$pool_member_port`"}"
+
+    }
+
+    $res = Invoke-F5RestMethod $req $f5_connection
+    $res
+
 }
 
 function Get-F5VirtualServerPolicy {
@@ -825,7 +913,7 @@ function Set-F5PoolMemberState {
     )
 
     $req = @{
-        Uri    = "/ltm/pool/$name/members/~Common~$member"
+        Uri    = "/ltm/pool/$name/members/$member"
         Method = 'PUT'
         ContentType = 'application/json'
         body = "{ `"state`":`"$state`", `"session`":`"$session`" }"
@@ -1020,7 +1108,10 @@ function Get-F5PolicyRule {
         $f5_connection,
 
         [switch]
-        $draft
+        $draft,
+
+        [switch]
+        $expand_subcollections
     )
 
     $req = @{
@@ -1028,8 +1119,14 @@ function Get-F5PolicyRule {
         Method      = 'GET'
     }
 
+
+
     if ($draft) {
         $req.Uri = "/ltm/policy/~Common~Drafts~$policy_name/rules/$rule_name"
+    }
+
+    if ($expand_subcollections) {
+        $req.Uri += '?expandSubcollections=true'
     }
 
     $res = Invoke-F5RestMethod $req $f5_connection
