@@ -390,6 +390,7 @@ function Get-F5VirtualServer {
         $req.Uri += '?expandSubcollections=true'
     }
 
+ 
     $res = Invoke-F5RestMethod $req $f5_connection
 
     if (!$name) {
@@ -590,6 +591,93 @@ function Get-F5VirtualServerProfile {
         return $res.items
     }
     return $res
+}
+
+function Get-F5VirtualServerPools {
+    <#
+        Pools can be attached to a virutal server in a number of ways. This method supports two:
+        1. default pool
+        2. pool attached as part of a policy
+    #>
+
+
+    param(
+        [string][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $name,
+
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+
+
+
+    # Get the existing virtual server object.
+    $vs = Get-F5VirtualServer -name $name -expand_subcollections 
+    #Write-Host "Found virtual server $($vs.name)"
+
+
+
+    # Get the default pool if it exists
+    $pools = @()
+    if($vs.pool -ne $null){
+        $pools += Get-F5Pool -name $vs.pool.replace("/","~")
+    }
+
+
+    # Get an attached policy (noting that not all policies are ones that will reference a pool)
+
+    if($vs.policiesReference.items -ne $null){
+        foreach($item in $vs.policiesReference.items){
+            
+            $pol_rules = Get-F5PolicyRule -policy_name $item.fullPath.replace("/","~") -expand_subcollections
+            foreach($rule in $pol_rules){
+              #  Write-Host "Policy Rule name $($rule.actionsReference)"
+                $action_references = $rule.actionsReference.items
+                foreach($ar in $action_references){
+                    if($ar.pool -ne $null){
+                        $pools += Get-F5Pool -name $ar.pool.replace("/","~")
+                    }
+                }
+
+            }
+
+        }
+
+    }
+
+    return $pools
+    
+
+}
+
+function Add-F5PoolMember {
+    param(
+        [string][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $name,
+
+        [string][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $pool_member_address,
+
+        [int][Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+        $pool_member_port,
+
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+
+
+
+    $req = @{
+        Uri = "/ltm/pool/$name/members"
+        Method = 'POST'
+        ContentType = 'application/json'
+        body = "{  `"name`":`"$pool_member_address`:$pool_member_port`"}"
+
+    }
+
+    $res = Invoke-F5RestMethod $req $f5_connection
+    $res
+
 }
 
 function Get-F5VirtualServerPolicy {
@@ -825,7 +913,7 @@ function Set-F5PoolMemberState {
     )
 
     $req = @{
-        Uri    = "/ltm/pool/$name/members/~Common~$member"
+        Uri    = "/ltm/pool/$name/members/$member"
         Method = 'PUT'
         ContentType = 'application/json'
         body = "{ `"state`":`"$state`", `"session`":`"$session`" }"
@@ -1020,7 +1108,10 @@ function Get-F5PolicyRule {
         $f5_connection,
 
         [switch]
-        $draft
+        $draft,
+
+        [switch]
+        $expand_subcollections
     )
 
     $req = @{
@@ -1028,8 +1119,14 @@ function Get-F5PolicyRule {
         Method      = 'GET'
     }
 
+
+
     if ($draft) {
         $req.Uri = "/ltm/policy/~Common~Drafts~$policy_name/rules/$rule_name"
+    }
+
+    if ($expand_subcollections) {
+        $req.Uri += '?expandSubcollections=true'
     }
 
     $res = Invoke-F5RestMethod $req $f5_connection
@@ -1622,6 +1719,200 @@ function Publish-F5AccessPolicy {
         Uri    = "/apm/profile/access/$($path -replace '/', '~')"
         Method = 'PATCH'
         Body   = '{ "generationAction":"increment" }'
+    }
+
+    $res = Invoke-F5RestMethod $req $f5_connection
+    return $res
+}
+
+function execute-F5BashCommand {
+    param (
+
+        [string]
+        $command
+    )
+
+    $body = @{
+        command = "run"
+        "utilCmdArgs" = $command
+
+    }
+
+
+    $req = @{
+        Uri    = "/util/bash"
+        Method = 'POST'
+        Body = $body | convertto-json
+        ContentType = "application/json"
+    }
+
+
+    $res = Invoke-F5RestMethod $req $f5_connection
+    $res
+}
+
+
+function get-F5UrlCategory {
+   
+    param (
+
+        [string]
+        $name,
+        
+        [switch][Parameter(Mandatory = $false, ParameterSetName = 'custom')]
+        $custom_only,
+
+        [switch][Parameter(Mandatory = $false,ParameterSetName = 'noncustom')]
+        $noncustom_only,
+
+        [switch][Parameter(Mandatory = $false,ParameterSetName = 'all')]
+        $all,
+
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+    
+
+    $req = @{
+        Uri    = "/sys/url-db/url-category"
+        Method = 'GET'
+    }
+
+    $res = Invoke-F5RestMethod $req $f5_connection
+    $items = $res.items
+ 
+
+
+    $matches = @()
+    if($name){
+        foreach($urlcategory in $items){
+            if($name.ToLower() -eq $($urlcategory).name.toLower()){
+                if($custom_only  -and ($($urlcategory.isCustom) -eq "true")){
+                    $matches+=$urlcategory
+                }elseif ($noncustom_only -and ($($urlcategory.isCustom) -eq "false")){
+                    $matches += $urlcategory
+                }elseif (!$noncustom_only -and !$custom_only){
+                    $matches += $urlcategory
+                }
+            }
+        }
+    }else{
+        foreach($urlcategory in $items){
+            if($custom_only  -and ($($urlcategory.isCustom) -eq "true")){
+                $matches+=$urlcategory
+            }elseif ($noncustom_only -and ($($urlcategory.isCustom) -eq "false")){
+                $matches += $urlcategory
+            }elseif (!$noncustom_only -and !$custom_only){
+                $matches += $urlcategory
+            }
+        }
+    }
+    
+    return $matches
+}
+
+
+function new-F5UrlCategory {
+<#
+    This function does not work, as the method appears to not be supported on the F5.
+#>
+
+    param (
+
+        [string]
+        $name,
+
+        [string]
+        $display_name,
+
+        [string]
+        $description,
+        
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+
+    $body = @{
+        displayName = $name
+        appService = $name
+        description = $description
+    }
+
+
+    $req = @{
+        Uri         = "/sys/url-db/url-category/$name"
+        Method      = "POST"
+        Body        = $body | convertto-json
+        ContentType = 'application/json'
+    }
+
+    $res = Invoke-F5RestMethod $req $f5_connection
+    return $res
+}
+
+
+function Remove-F5UrlCategory {
+<#
+    This function does not work, as the method appears to not be supported on the F5.
+#>
+
+    param (
+
+        [string]
+        $name,
+
+        [string]
+        $display_name,
+
+        
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+
+    $req = @{
+        Uri         = "/sys/url-db/url-category/$name"
+        Method      = "DELETE"
+        ContentType = 'application/json'
+    }
+
+    $res = Invoke-F5RestMethod $req $f5_connection
+    return $res
+}
+
+
+function Add-F5URLsToCategory{
+<#
+    Use method at your own risk.
+
+    Appears to work declarativly, in that you must include the entire set of URLS you want to persist, not just additional ones
+
+#>
+    param (
+
+        [string]
+        $name,
+
+        [string]
+        $display_name,
+
+        [Object[]]
+        $urls,
+        
+        [string][Parameter(Mandatory = $false)][ValidateNotNullOrEmpty()]
+        $f5_connection
+    )
+
+    $body = @{
+        urls = $urls
+        displayName = $display_name
+    }
+
+
+    $req = @{
+        Uri         = "/sys/url-db/url-category/$name"
+        Method      = "PATCH"
+        Body        = $body | convertto-json
+        ContentType = 'application/json'
     }
 
     $res = Invoke-F5RestMethod $req $f5_connection
